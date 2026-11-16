@@ -4,10 +4,14 @@
 // files with the name and version from their header, libraries embedded in them, CDN links,
 // what the environment has to provide, and where the metadata (author, license, product) is.
 //
-// Usage: node scan_repo.js [<repo>] [--since <git ref | sbom.cdx.json>] [--inventory <sbom-inventory.json>] [--json]
+// Usage: node scan_repo.js [<repo>] [--since <git ref | sbom.cdx.json>] [--inventory <sbom-inventory.json> [--check]] [--json]
 //   --since      only report what changed after that commit; an SBOM made by build_sbom.js 1.2+
 //                records its commit, so the previous SBOM can be passed as is
-//   --inventory  compare the findings with an existing inventory: what is missing, what is gone
+//   --inventory  compare the findings with an existing inventory: what is missing, what is gone,
+//                and as warnings what looks different (version, used, embedded libraries, PHP extensions)
+//   --check      with --inventory: exit 1 when the inventory misses something or names something that
+//                is gone, so that a workflow stops before it builds an SBOM from a stale inventory.
+//                Warnings do not fail the check. Prints only the comparison.
 //   --json       print JSON instead of Markdown
 //
 // The scan reads the files git tracks, so build output and node_modules are left out. It finds
@@ -274,27 +278,97 @@ if (opt('--since')) {
 }
 
 // ---------- 8. comparison with an existing inventory ----------
+// Differences make --check fail: the inventory names a file that is gone, or misses a third-party
+// file, a link or a lockfile import. Warnings are heuristics that a person has to look at.
 let inventory;
 if (opt('--inventory')) {
   const inv = JSON.parse(fs.readFileSync(opt('--inventory'), 'utf8'));
-  const invPaths = (inv.components || []).flatMap((c) => (c.files || []).filter((x) => x.path).map((x) => x.path.replace(/\\/g, '/')));
-  const invUrls = (inv.components || []).flatMap((c) => (c.files || []).filter((x) => x.url).map((x) => x.url.replace(/^https?:/, '')));
+  const comps = inv.components || [];
+  const invPaths = comps.flatMap((c) => (c.files || []).filter((x) => x.path).map((x) => x.path.replace(/\\/g, '/')));
+  const invUrls = comps.flatMap((c) => (c.files || []).filter((x) => x.url).map((x) => x.url.replace(/^https?:/, '')));
+  const owner = (p) => comps.find((c) => (c.files || []).some((x) => x.path && x.path.replace(/\\/g, '/') === p));
+  const ownerOfUrl = (u) => comps.find((c) => (c.files || []).some((x) => x.url && x.url.replace(/^https?:/, '') === u));
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const sameVersion = (a, b) => String(a).replace(/^v/, '') === String(b).replace(/^v/, '');
+  const warnings = [];
+  // The version in the header or file name against the version in the inventory.
+  for (const t of thirdParty.filter((x) => x.version)) {
+    const c = owner(t.path);
+    if (c && c.version && !sameVersion(c.version, t.version)) warnings.push(`${t.path}: versie ${t.version} (uit ${t.versionFrom}), de inventaris noemt ${c.key} ${c.version}`);
+  }
+  for (const e of external.filter((x) => x.version)) {
+    const c = ownerOfUrl(e.url.replace(/^https?:/, ''));
+    if (c && c.version && !sameVersion(c.version, e.version)) warnings.push(`${e.url} (${e.file}:${e.line}): versie ${e.version}, de inventaris noemt ${c.key} ${c.version}`);
+  }
+  // used in the inventory against what loads the files. Only for files the scan recognises.
+  for (const c of comps.filter((x) => (x.files || []).some((f) => f.path))) {
+    const scanned = (c.files || []).filter((f) => f.path).map((f) => thirdParty.find((t) => t.path === f.path.replace(/\\/g, '/'))).filter(Boolean);
+    if (!scanned.length) continue;
+    const loaders = [...new Set(scanned.flatMap((t) => t.usedBy))];
+    if (c.used === false && loaders.length) warnings.push(`${c.key}: staat op used: false, maar wordt geladen door ${loaders.join(', ')}`);
+    if (c.used !== false && !loaders.length) warnings.push(`${c.key}: niets laadt ${scanned.map((t) => t.path).join(', ')}; klopt used${c.used === undefined ? ' (niet ingevuld)' : ': true'}?`);
+  }
+  // Libraries embedded in a file of a component, without a component that has embeddedIn.
+  for (const t of thirdParty.filter((x) => x.embedded.length)) {
+    const c = owner(t.path);
+    if (!c) continue;
+    for (const x of t.embedded) {
+      const known = comps.some((o) => o.embeddedIn === c.key && (norm(o.name).includes(norm(x.name)) || norm(o.key).includes(norm(x.name))));
+      if (!known) warnings.push(`${t.path}:${x.line}: ${x.name} ${x.version} is ingebed in ${c.key}, maar geen component heeft embeddedIn: "${c.key}"`);
+    }
+  }
+  // PHP extensions the code uses, without a component that names them.
+  for (const p of phpExtensions) {
+    if (!comps.some((c) => [c.key, c.name, c.purl].some((v) => norm(v).includes(norm(p.name))))) warnings.push(`PHP-extensie ${p.name} (${p.file}:${p.line}) staat niet in de inventaris`);
+  }
+  // A manifest without a lockfile: its packages belong in the inventory, by hand or as an import.
+  const PURL_TYPE = { npm: 'npm', Python: 'pypi', PHP: 'composer', Go: 'golang', Rust: 'cargo', Java: 'maven', Ruby: 'gem', '.NET': 'nuget' };
+  for (const e of ecosystems.filter((x) => x.manifests.length && !x.lockfiles.length)) {
+    if (!(inv.import || []).length && !comps.some((c) => String(c.purl || '').startsWith(`pkg:${PURL_TYPE[e.name]}/`))) warnings.push(`${e.manifests.join(', ')}: ${e.name}-pakketten, maar geen component met een pkg:${PURL_TYPE[e.name]}-purl en geen import`);
+  }
   inventory = {
     gone: invPaths.filter((p) => !files.includes(p)),
     notInInventory: thirdParty.filter((t) => !invPaths.includes(t.path) && !/\.(woff2?|ttf|eot|otf)$/.test(t.path)).map((t) => t.path),
     linksNotInInventory: [...new Set(external.map((e) => e.url.replace(/^https?:/, '')).filter((u) => !invUrls.includes(u)))],
     lockfilesNotImported: ecosystems.flatMap((e) => e.lockfiles).filter(() => !(inv.import || []).length),
+    warnings,
   };
+  inventory.differences = inventory.gone.length + inventory.notInInventory.length + inventory.linksNotInInventory.length + inventory.lockfilesNotImported.length;
+}
+const check = args.includes('--check');
+if (check && !inventory) {
+  console.error('--check werkt alleen samen met --inventory <sbom-inventory.json>');
+  process.exit(2);
 }
 
 // ---------- output ----------
 const result = { repo, commit: isGit ? tryGit('rev-parse', 'HEAD') : undefined, ecosystems, thirdParty, external, environment, phpExtensions, metadata, since, inventory };
+const exitCode = check && inventory.differences ? 1 : 0;
 if (args.includes('--json')) {
   console.log(JSON.stringify(result, null, 2));
-  process.exit(0);
+  process.exit(exitCode);
 }
 const out = [];
 const say = (...l) => out.push(...l);
+const sayInventory = () => {
+  say('## Vergeleken met de inventaris', '');
+  if (!inventory.differences && !inventory.warnings.length) say('Geen verschillen gevonden.');
+  if (inventory.gone.length) say(`- **Staat in de inventaris, niet meer in de repo:** ${inventory.gone.join(', ')}`);
+  if (inventory.notInInventory.length) say(`- **Bestanden van derden die niet in de inventaris staan:** ${inventory.notInInventory.join(', ')}`);
+  if (inventory.linksNotInInventory.length) say(`- **Externe links die niet in de inventaris staan:** ${inventory.linksNotInInventory.join(', ')}`);
+  if (inventory.lockfilesNotImported.length) say(`- **Lockfiles zonder import van tooluitvoer:** ${inventory.lockfilesNotImported.join(', ')}`);
+  if (inventory.warnings.length) say(...(inventory.differences ? [''] : []), '**Waarschuwingen** (controleer deze; ze laten de controle niet falen):', '', ...inventory.warnings.map((w) => `- ${w}`));
+  say('');
+};
+if (check) {
+  say(`# Inventaris gecontroleerd tegen ${path.basename(repo)}${result.commit ? ` op ${result.commit.slice(0, 12)}` : ''}`, '');
+  sayInventory();
+  say(inventory.differences
+    ? 'De inventaris klopt niet met de repository. Werk sbom-inventory.json bij (zie SKILL.md, stap 1) en maak de SBOM daarna opnieuw.'
+    : 'De inventaris dekt wat de scan in de repository vindt.');
+  console.log(out.join('\n'));
+  process.exit(exitCode);
+}
 say(`# Scan van ${path.basename(repo)}${result.commit ? ` op ${result.commit.slice(0, 12)}` : ''}`, '');
 if (since) {
   say('## Sinds de vorige SBOM', '');
@@ -308,15 +382,7 @@ if (since) {
     say('');
   }
 }
-if (inventory) {
-  say('## Vergeleken met de inventaris', '');
-  if (!inventory.gone.length && !inventory.notInInventory.length && !inventory.linksNotInInventory.length && !inventory.lockfilesNotImported.length) say('Geen verschillen gevonden.');
-  if (inventory.gone.length) say(`- **Staat in de inventaris, niet meer in de repo:** ${inventory.gone.join(', ')}`);
-  if (inventory.notInInventory.length) say(`- **Bestanden van derden die niet in de inventaris staan:** ${inventory.notInInventory.join(', ')}`);
-  if (inventory.linksNotInInventory.length) say(`- **Externe links die niet in de inventaris staan:** ${inventory.linksNotInInventory.join(', ')}`);
-  if (inventory.lockfilesNotImported.length) say(`- **Lockfiles zonder import van tooluitvoer:** ${inventory.lockfilesNotImported.join(', ')}`);
-  say('');
-}
+if (inventory) sayInventory();
 say('## Manifests en lockfiles', '');
 if (!ecosystems.length) say('Geen gevonden. Alles wat van derden komt, staat dus als bestand in de repo, achter een externe link, of in de omgeving.');
 for (const e of ecosystems) {

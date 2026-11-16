@@ -2,11 +2,13 @@
 // Builds a CycloneDX 1.7 SBOM (with VEX) and an SPDX 2.3 SBOM from an inventory file,
 // covering the 2026 CISA minimum elements. Needs Node 18+ (global fetch) and git for repo hashes.
 //
-// Usage: node build_sbom.js <inventory.json> [--out <dir>] [--version <v>] [--no-osv] [--no-fetch]
+// Usage: node build_sbom.js <inventory.json> [--out <dir>] [--version <v>] [--no-osv] [--no-fetch] [--strict]
 //   --out       directory for sbom.cdx.json, sbom.spdx.json and sbom-gaps.md (default: the repo root)
 //   --version   product version, for example the release tag; overrides product.version
 //   --no-osv    skip the vulnerability lookup at api.osv.dev
 //   --no-fetch  do not download remote (CDN) files to hash them
+//   --strict    exit 1 when the inventory names a repository file that cannot be read, or an
+//               embeddedIn that points nowhere; for workflows, which should not publish such an SBOM
 //
 // The inventory format is described in inventaris-formaat.md, next to SKILL.md.
 
@@ -16,14 +18,14 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const osv = require('./osv');
 
-const TOOL = { name: 'geonovum-sbom build_sbom.js', version: '1.2.0' };
+const TOOL = { name: 'geonovum-sbom build_sbom.js', version: '1.3.0' };
 
 const args = process.argv.slice(2);
 const flag = (f) => args.includes(f);
 const opt = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 const invFile = args.find((a, i) => !a.startsWith('--') && !['--out', '--version'].includes(args[i - 1]));
 if (!invFile) {
-  console.error('usage: node build_sbom.js <inventory.json> [--out <dir>] [--version <v>] [--no-osv] [--no-fetch]');
+  console.error('usage: node build_sbom.js <inventory.json> [--out <dir>] [--version <v>] [--no-osv] [--no-fetch] [--strict]');
   process.exit(2);
 }
 const inv = JSON.parse(fs.readFileSync(invFile, 'utf8'));
@@ -31,6 +33,9 @@ const repo = path.resolve(path.dirname(invFile), inv.repo || '.');
 const outDir = path.resolve(opt('--out') || repo);
 const gaps = [];
 const gap = (what) => { if (!gaps.includes(what)) gaps.push(what); };
+// Errors in the inventory itself, as opposed to missing CISA elements; --strict fails on them.
+const errors = [];
+const error = (what) => { gap(what); if (!errors.includes(what)) errors.push(what); };
 
 // ---------- helpers ----------
 const run = (cmd, a) => execFileSync(cmd, a, { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -118,7 +123,7 @@ const main = async () => {
         else if (f.url && !flag('--no-fetch')) c.fileHashes.push({ name: f.name || f.url.split('?')[0].split('/').pop(), url: f.url, ...digest(await fetchBuf(f.url)) });
         else if (f.url) gap(`${c.name}: extern bestand ${f.url} niet gehasht (--no-fetch)`);
       } catch (e) {
-        gap(`${c.name}: kon ${f.path || f.url} niet hashen (${e.message})`);
+        (f.path ? error : gap)(`${c.name}: kon ${f.path || f.url} niet hashen (${e.message})`);
       }
     }
   }
@@ -126,7 +131,7 @@ const main = async () => {
   // bootstrap.bundle.js) has no file of its own; it carries the hash of the file it lives in.
   for (const c of components.filter((x) => x.embeddedIn)) {
     const host = byKey[c.embeddedIn];
-    if (!host) { gap(`${c.name}: embeddedIn verwijst naar onbekende component ${c.embeddedIn}`); continue; }
+    if (!host) { error(`${c.name}: embeddedIn verwijst naar onbekende component ${c.embeddedIn}`); continue; }
     c.hostFile = host.fileHashes.find((f) => !c.embeddedFile || f.name === c.embeddedFile || (f.url || '').includes(c.embeddedFile));
     if (!c.hostFile) gap(`${c.name}: omringend bestand ${c.embeddedFile || ''} van ${host.name} niet gehasht`);
     if (c.used === undefined) c.used = host.used;
@@ -442,6 +447,10 @@ const main = async () => {
   ].join('\n');
   fs.writeFileSync(path.join(outDir, 'sbom-gaps.md'), report);
   console.log(report);
+  if (flag('--strict') && errors.length) {
+    console.error(`--strict: de inventaris bevat ${errors.length} fout(en):\n${errors.map((e) => `- ${e}`).join('\n')}`);
+    process.exit(1);
+  }
 };
 
 main().catch((e) => { console.error(e); process.exit(1); });

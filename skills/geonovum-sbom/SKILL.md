@@ -57,6 +57,8 @@ Een SBOM die met deze skill is gemaakt (versie 1.2 of later), noemt de commit di
 - **Niets relevants gewijzigd:** de inventaris blijft zoals hij is. Ga door naar stap 6; het script maakt een nieuwe SBOM met de nieuwe versie, de hashes en de actuele kwetsbaarheden.
 - **Wel wijzigingen:** werk alleen die bij, met stap 2 tot en met 5.
 
+Bij de vergelijking met de inventaris staan ook waarschuwingen: een andere versie in de kopregel, bestandsnaam of CDN-URL, `used` dat niet past bij wat de bestanden laadt, een ingebedde bibliotheek zonder component met `embeddedIn`, een PHP-extensie of een manifest zonder component. Dat zijn aanwijzingen, geen zekerheden; loop ze na. Met `--check` toont het script alleen de vergelijking en eindigt het met een fout als de inventaris een bestand van derden, externe link of lockfile-import mist, of een bestand noemt dat weg is. Waarschuwingen laten de controle niet falen. De workflows in stap 8 gebruiken dit.
+
 ### 2. Draai de tooling
 
 Eerst de scan van de hele repository:
@@ -140,6 +142,8 @@ Aandachtspunten die vaak fout gaan:
 node <skillmap>/scripts/build_sbom.js <inventory.json> --out <map>
 ```
 
+Met `--strict` eindigt het script met een fout als de inventaris een bestand in de repo noemt dat niet te lezen is, of een `embeddedIn` die naar geen component wijst. Zonder `--strict` komt dat alleen in `sbom-gaps.md`.
+
 Het script hasht bestanden uit de repo vanaf de **gecommitte versie** (`git show HEAD:pad`), niet vanaf de werkkopie. Op Windows zet `core.autocrlf` de regeleinden om, en dan krijg je hashes die niemand anders kan reproduceren. Externe bestanden worden gedownload en gehasht. Kwetsbaarheden komen van api.osv.dev. De commit komt in de SBOM, zodat stap 1 de volgende keer werkt.
 
 Schrijf eerst naar een tijdelijke map en vergelijk met bestaande SBOMs in de repo voordat je iets overschrijft. Zeg wat er inhoudelijk verschilt.
@@ -170,20 +174,22 @@ Werk ook de README bij als die de SBOM-bestanden of hun formaat beschrijft. Stel
 
 ### 8. Automatiseer: een SBOM bij elke release, en een doorlopende controle
 
-Een SBOM hoort bij één versie. De kwetsbaarheden van die versie veranderen wel: er komen elke dag meldingen bij. Dat zijn twee aparte taken, met elk een eigen sjabloon:
+Een SBOM hoort bij één versie. De kwetsbaarheden van die versie veranderen wel: er komen elke dag meldingen bij. Dat zijn aparte taken, met elk een eigen sjabloon:
 
 - [`assets/workflows/sbom.yml`](assets/workflows/sbom.yml) maakt bij elke gepubliceerde release de SBOMs uit de gecommitte inventaris. Hij valideert ze, ondertekent ze met een build-attestatie van GitHub, en hangt ze als asset aan de release.
+  Eerst controleert hij met `scan_repo.js --check` of de inventaris nog klopt met de repository, en `build_sbom.js --strict` faalt als de inventaris een bestand noemt dat niet te lezen is. Een verouderde inventaris levert zo geen SBOM op die geldig is maar niet klopt.
+- [`assets/workflows/sbom-inventaris.yml`](assets/workflows/sbom-inventaris.yml) doet dezelfde controle bij elke pull request en elke push naar de hoofdbranch, met alleen leesrechten. Wie een bibliotheek toevoegt of weghaalt zonder de inventaris bij te werken, ziet dat in de pull request en niet pas bij de release.
 - [`assets/workflows/sbom-kwetsbaarheden.yml`](assets/workflows/sbom-kwetsbaarheden.yml) legt elke week de SBOM van de versie die in gebruik is naast OSV, met `check_vulns.js`. Dat is de SBOM die aan de release hangt, niet de broncode op de hoofdbranch. Welke release in gebruik is, staat in de repository-variabele `SBOM_IN_GEBRUIK`; zonder die variabele is het de laatste release. Wat nog beoordeeld moet worden, komt in een issue met het label `sbom`. Beoordelingen in het `vex`-blok van de inventaris tellen mee, ook als ze van na de release zijn.
 
 Zo zet je het op:
 
 1. Commit de inventaris als `sbom-inventory.json` in de root, met `"repo": "."`. Laat `product.version` weg: de workflow gebruikt de release-tag.
-2. Kopieer beide sjablonen naar `.github/workflows/`. Vervang `__SKILL_REF__` door een release-tag of commit-SHA van de skill-repository. Gebruik nooit een branchnaam: dan komt elke wijziging aan de skill ongemerkt in de workflow terecht.
+2. Kopieer de drie sjablonen naar `.github/workflows/`. Vervang in elk `__SKILL_REF__` door dezelfde een release-tag of commit-SHA van de skill-repository. Gebruik nooit een branchnaam: dan komt elke wijziging aan de skill ongemerkt in de workflow terecht.
 3. De actions in de sjablonen zijn vastgezet op een commit-hash, met het versienummer als commentaar. Een tag als `@v7` kan later naar andere code wijzen, een hash niet. Kopieer [`assets/dependabot.yml`](assets/dependabot.yml) naar `.github/dependabot.yml`, zodat Dependabot een pull request opent als er een nieuwe versie is.
 4. Moeten de versies uit een build komen (stap 3), vul dan in `sbom.yml` de stap "Bouwen en afhankelijkheden lezen" in die als commentaar klaarstaat.
 5. Haal gecommitte SBOMs weg zodra de eerste release met SBOM er is, en verwijs in de README naar de release-assets.
 
-Heeft de repository geen releases, omdat de hoofdbranch direct wordt uitgerold? Stel dan voor om bij elke uitrol een tag te zetten. Beide workflows zijn ook met de hand te starten.
+Heeft de repository geen releases, omdat de hoofdbranch direct wordt uitgerold? Stel dan voor om bij elke uitrol een tag te zetten. De workflows zijn ook met de hand te starten.
 
 Een controle kan ook zonder workflow, op elke SBOM:
 
@@ -191,10 +197,10 @@ Een controle kan ook zonder workflow, op elke SBOM:
 node <skillmap>/scripts/check_vulns.js sbom.cdx.json --vex sbom-inventory.json --out <map>
 ```
 
-De inventaris blijft mensenwerk. Pas hem aan als er een component bijkomt, verdwijnt of een andere versie krijgt; stap 1 laat zien wanneer dat nodig is. Leg in het `vex`-blok vast hoe kwetsbaarheden uit de issues zijn beoordeeld.
+De inventaris blijft mensenwerk. Pas hem aan als er een component bijkomt, verdwijnt of een andere versie krijgt; stap 1 laat zien wanneer dat nodig is, en `sbom-inventaris.yml` houdt dat bij elke pull request in de gaten. Leg in het `vex`-blok vast hoe kwetsbaarheden uit de issues zijn beoordeeld.
 
 ## Wat je oplevert
 
 - `sbom.cdx.json` en `sbom.spdx.json`, gevalideerd.
 - Een kort verslag: welke componenten, welke kwetsbaarheden met welke VEX-status, wat er verschilt met de vorige SBOM (als die er was), welke aannames je deed, en de open punten uit `sbom-gaps.md`.
-- Als de gebruiker dat wil: `sbom-inventory.json`, `.github/workflows/sbom.yml`, `.github/workflows/sbom-kwetsbaarheden.yml` en `.github/dependabot.yml`, zodat de SBOM bij elke release opnieuw wordt gemaakt en de kwetsbaarheden doorlopend worden gecontroleerd.
+- Als de gebruiker dat wil: `sbom-inventory.json`, `.github/workflows/sbom.yml`, `.github/workflows/sbom-inventaris.yml`, `.github/workflows/sbom-kwetsbaarheden.yml` en `.github/dependabot.yml`, zodat de SBOM bij elke release opnieuw wordt gemaakt en de kwetsbaarheden doorlopend worden gecontroleerd.
