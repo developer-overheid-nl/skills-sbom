@@ -2,8 +2,8 @@ publiccodeYmlVersion: "0.7"
 
 name: SBOM-skill
 url: https://github.com/developer-overheid-nl/skills-sbom.git
-softwareVersion: "0.0.2"
-releaseDate: "2026-11-06"
+softwareVersion: "0.1.0"
+releaseDate: "2026-11-16"
 landingURL: https://github.com/developer-overheid-nl/skills-sbom
 softwareType: addon
 
