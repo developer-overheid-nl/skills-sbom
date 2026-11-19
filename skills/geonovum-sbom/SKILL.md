@@ -73,6 +73,7 @@ Die geeft, met bestand en regel:
 - **Bestanden van derden**: `.js`, `.css` en fonts met naam, versie en licentie uit de kopregel of de bestandsnaam, en bibliotheken die erin zijn ingebed (zoals yepnope in Modernizr).
 - **Of ze geladen worden**: welke bestanden ernaar verwijzen, zonder commentaar mee te tellen. "Niets gevonden" wijst op `used: false`.
 - **CDN- en andere externe links** in HTML, templates, PHP en CSS, met de naam en versie uit de URL.
+- **Wie de releases maakt**: workflows die zelf een GitHub-release aanmaken, en met welk token (zie stap 8).
 - **Wat de omgeving levert**: `FROM` in Dockerfiles, runtimeversies, `engines`, `require.php` en `ext-*` in composer.json, versies in de README, en PHP-extensies uit de functies die de code gebruikt.
 - **Metadata**: product, licentie, copyright, auteur en contactpersonen, elk met het bestand waar het staat.
 
@@ -184,10 +185,11 @@ Een SBOM hoort bij één versie. De kwetsbaarheden van die versie veranderen wel
 Zo zet je het op:
 
 1. Commit de inventaris als `sbom-inventory.json` in de root, met `"repo": "."`. Laat `product.version` weg: de workflow gebruikt de release-tag.
-2. Kopieer de drie sjablonen naar `.github/workflows/`. Vervang in elk `__SKILL_REF__` door dezelfde een release-tag of commit-SHA van de skill-repository. Gebruik nooit een branchnaam: dan komt elke wijziging aan de skill ongemerkt in de workflow terecht.
+2. Kopieer de drie sjablonen naar `.github/workflows/`. Vervang in elk `__SKILL_REF__` door dezelfde release-tag of commit-SHA van de skill-repository. Gebruik nooit een branchnaam: dan komt elke wijziging aan de skill ongemerkt in de workflow terecht.
 3. De actions in de sjablonen zijn vastgezet op een commit-hash, met het versienummer als commentaar. Een tag als `@v7` kan later naar andere code wijzen, een hash niet. Kopieer [`assets/dependabot.yml`](assets/dependabot.yml) naar `.github/dependabot.yml`, zodat Dependabot een pull request opent als er een nieuwe versie is.
-4. Moeten de versies uit een build komen (stap 3), vul dan in `sbom.yml` de stap "Bouwen en afhankelijkheden lezen" in die als commentaar klaarstaat.
-5. Haal gecommitte SBOMs weg zodra de eerste release met SBOM er is, en verwijs in de README naar de release-assets.
+4. Maakt een workflow de release aan, bijvoorbeeld met `gh release create`, changesets of release-please, en gebruikt die `github.token`? Dan start het release-event `sbom.yml` niet: GitHub start geen workflows op events die met dat token zijn veroorzaakt. De scan meldt dit onder "Releases". Voeg dan in die workflow een job toe die `sbom.yml` aanroept met de tag, na het aanmaken van de release. Het voorbeeld staat bovenin `sbom.yml`; de job die de release maakt, geeft de tag als output. Maakt een GitHub App of een persoonlijk token de release, dan is dit niet nodig.
+5. Moeten de versies uit een build komen (stap 3), vul dan in `sbom.yml` de stap "Bouwen en afhankelijkheden lezen" in die als commentaar klaarstaat.
+6. Haal gecommitte SBOMs weg zodra de eerste release met SBOM er is, en verwijs in de README naar de release-assets.
 
 Heeft de repository geen releases, omdat de hoofdbranch direct wordt uitgerold? Stel dan voor om bij elke uitrol een tag te zetten. De workflows zijn ook met de hand te starten.
 

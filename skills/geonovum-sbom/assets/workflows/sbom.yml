@@ -9,6 +9,25 @@
 # ze als asset aan de release. De SBOMs worden niet gecommit: een gecommitte SBOM
 # beschrijft alleen het moment van committen en raakt daarna verouderd.
 #
+# Maakt een andere workflow de release aan met github.token (bijvoorbeeld met
+# `gh release create` of changesets/action), dan start GitHub deze workflow niet:
+# een event dat met dat token is veroorzaakt, start geen andere workflows. Roep hem
+# dan aan vanuit die workflow, als extra job na het aanmaken van de release:
+#
+#   sbom:
+#     needs: release
+#     if: needs.release.outputs.tag != ''
+#     permissions:
+#       contents: write
+#       id-token: write
+#       attestations: write
+#     uses: ./.github/workflows/sbom.yml
+#     with:
+#       tag: ${{ needs.release.outputs.tag }}
+#
+# De job die de release maakt, moet de tag dan als output geven. Gebruik één van
+# beide manieren, niet allebei, anders draait de workflow twee keer.
+#
 # Het controleren op nieuwe kwetsbaarheden staat los hiervan, in
 # sbom-kwetsbaarheden.yml: dat moet doorlopend gebeuren, op de SBOM van de versie
 # die in gebruik is, ook als er lang geen release komt.
@@ -22,6 +41,12 @@ name: SBOM
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag van de release waar de SBOMs aan komen te hangen
+        required: true
+        type: string
   workflow_dispatch:
 
 permissions:
@@ -31,6 +56,9 @@ env:
   SKILL_REPO: developer-overheid-nl/skills-sbom
   SKILL_REF: __SKILL_REF__
   SKILL_DIR: .sbom-skill/skills/geonovum-sbom
+  # De release-tag: uit het release-event, of meegegeven door de aanroepende
+  # workflow. Leeg bij een handmatige run; dan komt er niets aan een release.
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
 
 jobs:
   release:
@@ -40,8 +68,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # De SBOM beschrijft de code van de tag, ook als de aanroepende workflow
+      # op een andere commit draait.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.TAG }}
           persist-credentials: false
 
       - name: Skill ophalen
@@ -83,10 +114,8 @@ jobs:
       #     npx --yes @cyclonedx/cdxgen@11 -t js --required-only -o "$RUNNER_TEMP/bom.tool.cdx.json" --spec-version 1.6 .
 
       - name: SBOM maken
-        env:
-          VERSION: ${{ github.event.release.tag_name }}
         run: |
-          node "$SKILL_DIR/scripts/build_sbom.js" sbom-inventory.json --out "$RUNNER_TEMP/sbom" --strict ${VERSION:+--version "$VERSION"}
+          node "$SKILL_DIR/scripts/build_sbom.js" sbom-inventory.json --out "$RUNNER_TEMP/sbom" --strict ${TAG:+--version "$TAG"}
           cat "$RUNNER_TEMP/sbom/sbom-gaps.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: SBOM valideren
@@ -95,7 +124,7 @@ jobs:
           node "$SKILL_DIR/scripts/validate_sbom.js" "$RUNNER_TEMP/sbom" --deps "$RUNNER_TEMP/deps"
 
       - name: Ondertekenen met een build-attestatie
-        if: github.event_name == 'release'
+        if: env.TAG != ''
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
@@ -103,10 +132,9 @@ jobs:
             ${{ runner.temp }}/sbom/sbom.spdx.json
 
       - name: Aan de release hangen
-        if: github.event_name == 'release'
+        if: env.TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$TAG" "$RUNNER_TEMP/sbom/sbom.cdx.json" "$RUNNER_TEMP/sbom/sbom.spdx.json" --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Bewaren als artefact

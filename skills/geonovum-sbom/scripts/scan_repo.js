@@ -2,7 +2,8 @@
 // Scans a repository for what goes into an SBOM inventory, so that the agent starts from facts
 // with file and line instead of reading the whole repository: manifests and lockfiles, third-party
 // files with the name and version from their header, libraries embedded in them, CDN links,
-// what the environment has to provide, and where the metadata (author, license, product) is.
+// what the environment has to provide, which workflow makes the releases, and where the metadata
+// (author, license, product) is.
 //
 // Usage: node scan_repo.js [<repo>] [--since <git ref | sbom.cdx.json>] [--inventory <sbom-inventory.json> [--check]] [--json]
 //   --since      only report what changed after that commit; an SBOM made by build_sbom.js 1.2+
@@ -234,6 +235,33 @@ if (files.includes('pyproject.toml')) {
   }
 }
 
+// ---------- 5b. releases made by a workflow ----------
+// A release that a workflow creates with github.token starts no other workflow, so sbom.yml on
+// `release: published` would never run; that workflow has to call sbom.yml (workflow_call).
+const RELEASE_MAKERS = [
+  [/\bgh\s+release\s+create\b/, 'gh release create'],
+  [/softprops\/action-gh-release/, 'softprops/action-gh-release'],
+  [/ncipollo\/release-action/, 'ncipollo/release-action'],
+  [/actions\/create-release/, 'actions/create-release'],
+  [/changesets\/action/, 'changesets/action'],
+  [/release-please-action/, 'release-please-action'],
+  [/\bsemantic-release\b/, 'semantic-release'],
+];
+const releaseWorkflows = [];
+for (const f of files.filter((x) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(x) && !/(^|\/)sbom[^/]*\.ya?ml$/.test(x))) {
+  const text = read(f) || '';
+  // Another token (a GitHub App or a personal token) does start other workflows.
+  const otherToken = /create-github-app-token/.test(text) || /(GH_TOKEN|GITHUB_TOKEN|github-token|token)\s*:\s*\$\{\{\s*secrets\.(?!GITHUB_TOKEN\b)\w+/.test(text);
+  for (const [re, how] of RELEASE_MAKERS) {
+    const m = text.match(re);
+    // changesets/action makes a release only with a publish script and GitHub releases on
+    // (inputs publish/createGithubReleases in v1, publish-script/create-github-releases in v2.1+).
+    const step = m ? text.slice(m.index).split(/\n\s*- (?:uses|name|run):/)[0] : '';
+    if (m && how === 'changesets/action' && (!/\bpublish(?:-script)?\s*:/.test(step) || /(?:createGithubReleases|create-github-releases)\s*:\s*false/.test(step))) continue;
+    if (m) releaseWorkflows.push({ file: f, line: lineOf(text, m.index), how, token: otherToken ? 'ander token' : 'github.token' });
+  }
+}
+
 // ---------- 6. usage of third-party files ----------
 // The file name as a reference, not as part of a longer name: elem.style.cssText is not style.css.
 // SBOMs, the inventory and publiccode.yml name the files but do not load them.
@@ -342,7 +370,7 @@ if (check && !inventory) {
 }
 
 // ---------- output ----------
-const result = { repo, commit: isGit ? tryGit('rev-parse', 'HEAD') : undefined, ecosystems, thirdParty, external, environment, phpExtensions, metadata, since, inventory };
+const result = { repo, commit: isGit ? tryGit('rev-parse', 'HEAD') : undefined, ecosystems, thirdParty, external, environment, phpExtensions, releaseWorkflows, metadata, since, inventory };
 const exitCode = check && inventory.differences ? 1 : 0;
 if (args.includes('--json')) {
   console.log(JSON.stringify(result, null, 2));
@@ -404,6 +432,12 @@ say('', '## Omgeving', '');
 if (!environment.length && !phpExtensions.length) say('Geen aanwijzingen gevonden.');
 for (const e of environment) say(`- ${e.what}: \`${e.value.replace(/`/g, "'")}\` (${e.file}:${e.line})`);
 for (const p of phpExtensions) say(`- PHP-extensie ${p.name}: \`${p.match}\` (${p.file}:${p.line})`);
+if (releaseWorkflows.length) {
+  say('', '## Releases', '');
+  for (const r of releaseWorkflows) {
+    say(`- ${r.file}:${r.line} maakt de release (${r.how}) met ${r.token}.${r.token === 'github.token' ? ' Dan start het release-event sbom.yml niet: roep sbom.yml aan vanuit deze workflow (zie SKILL.md, stap 8).' : ''}`);
+  }
+}
 say('', '## Metadata', '');
 if (!metadata.length) say('Geen gevonden.');
 for (const m of metadata) say(`- ${m.field}: ${m.value} (${m.from})`);
